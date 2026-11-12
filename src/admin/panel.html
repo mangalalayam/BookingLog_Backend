@@ -30,11 +30,12 @@
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-bottom: 18px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
   label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
-  input {
+  input, select {
     width: 100%; padding: 9px 11px; font: inherit; color: var(--text);
     background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
   }
-  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  select.small { width: auto; padding: 4px 8px; font-size: 13px; }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   button {
     font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 8px; cursor: pointer;
     border: 1px solid var(--accent); background: var(--accent); color: var(--accent-text);
@@ -114,6 +115,33 @@
         </table>
       </div>
       <div id="list-msg" class="msg hidden"></div>
+    </section>
+
+    <!-- Team of one company -->
+    <section id="team" class="card hidden">
+      <div class="row" style="margin:0 0 10px;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">Team — <span id="team-name"></span></h2>
+        <button id="team-close" class="ghost small" type="button">Close</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Mobile</th><th>Role</th><th>Status</th><th></th></tr></thead>
+          <tbody id="members"></tbody>
+        </table>
+      </div>
+      <form id="m-form">
+        <h2 style="margin:18px 0 10px">Add staff / driver</h2>
+        <div class="grid">
+          <div><label for="m-name">Name</label><input id="m-name" required></div>
+          <div><label for="m-phone">Mobile (login)</label><input id="m-phone" inputmode="tel" required placeholder="9876543210"></div>
+          <div><label for="m-pass">Password (min 6)</label><input id="m-pass" type="text" minlength="6" required autocomplete="off"></div>
+          <div><label for="m-role">Role</label>
+            <select id="m-role"><option value="staff">Staff</option><option value="driver">Driver</option><option value="owner">Owner</option></select>
+          </div>
+        </div>
+        <div class="row"><button type="submit">Add member</button></div>
+      </form>
+      <div id="m-msg" class="msg hidden"></div>
     </section>
 
     <!-- Holidays -->
@@ -218,6 +246,7 @@
         <td data-label="Trips" class="num">${c.trips}</td>
         <td data-label="Created" class="muted">${new Date(c.created_at).toLocaleDateString()}</td>
         <td><div class="actions">
+          <button class="ghost small" data-act="team" data-id="${esc(c.id)}" data-name="${esc(c.name)}">Team</button>
           <button class="ghost small" data-act="rename" data-id="${esc(c.id)}" data-name="${esc(c.name)}">Rename</button>
           <button class="ghost small" data-act="toggle" data-id="${esc(c.id)}" data-active="${c.active}">${c.active ? 'Suspend' : 'Restore'}</button>
         </div></td>
@@ -228,6 +257,10 @@
     const btn = ev.target.closest('button[data-act]');
     if (!btn) return;
     const msg = $('list-msg');
+    if (btn.dataset.act === 'team') {
+      openTeam(btn.dataset.id, btn.dataset.name);
+      return;
+    }
     let patch;
     if (btn.dataset.act === 'rename') {
       const name = prompt('New company name', btn.dataset.name);
@@ -270,6 +303,109 @@
   });
 
   $('refresh').addEventListener('click', () => loadCompanies().catch(e => show($('list-msg'), e.message, 'bad')));
+
+  /* --------------------------------- team --------------------------------- */
+
+  const ROLES = ['owner', 'staff', 'driver'];
+  let teamCompany = null;
+
+  async function openTeam(id, name) {
+    teamCompany = id;
+    $('team-name').textContent = name;
+    hide($('m-msg'));
+    $('m-form').reset();
+    $('team').classList.remove('hidden');
+    try {
+      await loadMembers();
+    } catch (e) {
+      show($('m-msg'), e.message, 'bad');
+    }
+    $('team').scrollIntoView({behavior: 'smooth', block: 'start'});
+  }
+
+  async function loadMembers() {
+    const rows = await api('GET', `/admin/companies/${teamCompany}/members`);
+    const body = $('members');
+    body.innerHTML = rows.length ? rows.map(m => `
+      <tr>
+        <td data-label="Name"><strong>${esc(m.name)}</strong></td>
+        <td data-label="Mobile" class="num">${esc(m.phone)}</td>
+        <td data-label="Role">
+          <select class="small" data-act="role" data-id="${esc(m.id)}">
+            ${ROLES.map(r => `<option value="${r}"${r === m.role ? ' selected' : ''}>${r[0].toUpperCase() + r.slice(1)}</option>`).join('')}
+          </select>
+        </td>
+        <td data-label="Status"><span class="pill ${m.active ? 'on' : 'off'}">${m.active ? 'Active' : 'Disabled'}</span></td>
+        <td><div class="actions">
+          <button class="ghost small" data-act="password" data-id="${esc(m.id)}" data-name="${esc(m.name)}">Reset password</button>
+          <button class="ghost small" data-act="toggle" data-id="${esc(m.id)}" data-active="${m.active}">${m.active ? 'Disable' : 'Enable'}</button>
+        </div></td>
+      </tr>`).join('') : '<tr><td colspan="5" class="empty">No members yet.</td></tr>';
+  }
+
+  async function patchMember(id, patch) {
+    try {
+      await api('PATCH', `/admin/companies/${teamCompany}/members/${id}`, patch);
+      hide($('m-msg'));
+      await Promise.all([loadMembers(), loadCompanies()]);
+      return true;
+    } catch (e) {
+      show($('m-msg'), e.message, 'bad');
+      await loadMembers().catch(() => {});
+      return false;
+    }
+  }
+
+  $('members').addEventListener('change', ev => {
+    const sel = ev.target.closest('select[data-act="role"]');
+    if (sel) patchMember(sel.dataset.id, {role: sel.value});
+  });
+
+  $('members').addEventListener('click', async ev => {
+    const btn = ev.target.closest('button[data-act]');
+    if (!btn) return;
+    if (btn.dataset.act === 'password') {
+      const password = prompt(`New password for ${btn.dataset.name} (min 6 characters)`);
+      if (!password) return;
+      btn.disabled = true;
+      if (await patchMember(btn.dataset.id, {password})) {
+        show($('m-msg'), `Password changed for ${btn.dataset.name}.`, 'ok');
+      }
+      btn.disabled = false;
+    } else {
+      const active = btn.dataset.active === 'true';
+      if (active && !confirm('Disable this member? They will not be able to log in.')) return;
+      btn.disabled = true;
+      await patchMember(btn.dataset.id, {active: !active});
+    }
+  });
+
+  $('m-form').addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const btn = ev.submitter;
+    const msg = $('m-msg');
+    btn.disabled = true;
+    try {
+      const m = await api('POST', `/admin/companies/${teamCompany}/members`, {
+        name: $('m-name').value,
+        phone: $('m-phone').value,
+        password: $('m-pass').value,
+        role: $('m-role').value,
+      });
+      show(msg, `Added ${m.name} as ${m.role}. They can log in with ${m.phone} and the password you entered.`, 'ok');
+      ev.target.reset();
+      await Promise.all([loadMembers(), loadCompanies()]);
+    } catch (e) {
+      show(msg, e.message, 'bad');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $('team-close').addEventListener('click', () => {
+    teamCompany = null;
+    $('team').classList.add('hidden');
+  });
 
   /* ------------------------------- holidays ------------------------------- */
 

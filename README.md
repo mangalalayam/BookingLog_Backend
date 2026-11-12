@@ -35,7 +35,7 @@ Check it: open <http://localhost:4000/health>, which should show `{"ok":true}`.
 
 | Who | How they sign in | What they can do |
 | --- | --- | --- |
-| Provider (you) | `x-admin-key` header on `/admin/...` | Create, list, rename, suspend companies; maintain holidays |
+| Provider (you) | `x-admin-key` header on `/admin/...` | Create, list, rename, suspend companies; manage any company's staff and drivers; maintain holidays |
 | Owner | Phone + password | Everything in their company, including the team |
 | Staff | Phone + password | Add, edit, cancel trips; add and edit vehicles |
 | Driver | Phone + password | View only |
@@ -60,6 +60,7 @@ Errors come back as `{"error": {"code", "message", "details"}}`.
 | `GET /members`, `POST /members`, `PATCH /members/:id` | Team (changes are owner-only) |
 | `GET /holidays?year=2026` | Public holidays; no login needed |
 | `POST /admin/companies`, `GET /admin/companies`, `PATCH /admin/companies/:id` | Provider: manage companies |
+| `GET /admin/companies/:id/members`, `POST /admin/companies/:id/members`, `PATCH /admin/companies/:id/members/:memberId` | Provider: manage a company's team |
 | `PUT /admin/holidays`, `DELETE /admin/holidays/:date` | Provider: maintain holidays |
 
 Trips and vehicles use the same field names as the app's `Booking` and

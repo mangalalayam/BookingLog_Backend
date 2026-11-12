@@ -548,3 +548,52 @@ test('deactivated member and suspended company lose access at once', async () =>
   assert.equal(abc.members, 3);
   assert.equal(abc.trips, 6);
 });
+
+test('provider manages a company team from the admin panel', async () => {
+  const path = `/admin/companies/${abcCompanyId}/members`;
+  assert.equal((await call('GET', path)).status, 401);
+
+  const added = await call('POST', path, {
+    admin: true,
+    body: {name: 'Manu', phone: '9847000099', password: 'driver9', role: 'driver'},
+  });
+  assert.equal(added.status, 201);
+  assert.equal(added.body.role, 'driver');
+  await login('9847000099', 'driver9');
+
+  const dup = await call('POST', path, {
+    admin: true,
+    body: {name: 'Copy', phone: '9847000099', password: 'driver9'},
+  });
+  assert.equal(dup.status, 409);
+
+  const list = await call('GET', path, {admin: true});
+  assert.ok(list.body.some((m: any) => m.id === added.body.id));
+
+  // Reset password and promote to staff.
+  const updated = await call('PATCH', `${path}/${added.body.id}`, {
+    admin: true,
+    body: {role: 'staff', password: 'newpass1'},
+  });
+  assert.equal(updated.body.role, 'staff');
+  await login('9847000099', 'newpass1');
+
+  // The last active owner cannot be disabled or demoted.
+  const owner = list.body.find((m: any) => m.role === 'owner');
+  const lockout = await call('PATCH', `${path}/${owner.id}`, {
+    admin: true,
+    body: {active: false},
+  });
+  assert.equal(lockout.status, 400);
+
+  // A member id from another company is not found here.
+  const other = await call('GET', '/members', {token: xyzOwner});
+  const foreign = await call('PATCH', `${path}/${other.body[0].id}`, {
+    admin: true,
+    body: {name: 'Hijack'},
+  });
+  assert.equal(foreign.status, 404);
+
+  const missing = await call('GET', '/admin/companies/00000000-0000-0000-0000-000000000000/members', {admin: true});
+  assert.equal(missing.status, 404);
+});

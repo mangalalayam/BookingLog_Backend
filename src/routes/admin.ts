@@ -3,7 +3,7 @@ import {Router} from 'express';
 import {z} from 'zod';
 import {requireAdmin} from '../auth.ts';
 import {pool, transaction} from '../db.ts';
-import {conflict, dateString, notFound, parse, phone, uuid} from '../http.ts';
+import {badRequest, conflict, dateString, notFound, parse, phone, uuid} from '../http.ts';
 
 /*
  * Provider-only routes (you, the software provider). Every request needs the
@@ -86,6 +86,115 @@ router.patch('/admin/companies/:id', async (req, res) => {
     throw notFound('Company');
   }
   res.json(rows[0]);
+});
+
+/* --------------------------------- members -------------------------------- */
+
+const MEMBER_FIELDS = 'id, name, phone, role, active, created_at';
+const role = z.enum(['owner', 'staff', 'driver']);
+
+const companyExists = async (id: string) => {
+  const found = await pool.query('select 1 from companies where id = $1', [id]);
+  if (!found.rowCount) {
+    throw notFound('Company');
+  }
+};
+
+/** GET /admin/companies/:id/members → that company's team */
+router.get('/admin/companies/:id/members', async (req, res) => {
+  const companyId = parse(uuid, req.params.id);
+  await companyExists(companyId);
+  const {rows} = await pool.query(
+    `select ${MEMBER_FIELDS} from users where company_id = $1 order by created_at`,
+    [companyId],
+  );
+  res.json(rows);
+});
+
+const createMemberSchema = z.object({
+  name: z.string().trim().min(1),
+  phone,
+  password: z.string().min(6, 'Password must be at least 6 characters'),
+  role: role.default('staff'),
+});
+
+/** POST /admin/companies/:id/members  {name, phone, password, role?} */
+router.post('/admin/companies/:id/members', async (req, res) => {
+  const companyId = parse(uuid, req.params.id);
+  const input = parse(createMemberSchema, req.body);
+  await companyExists(companyId);
+
+  const taken = await pool.query('select 1 from users where phone = $1', [
+    input.phone,
+  ]);
+  if (taken.rowCount) {
+    throw conflict('That phone number already has an account');
+  }
+
+  const {rows} = await pool.query(
+    `insert into users (company_id, role, name, phone, password_hash)
+     values ($1, $2, $3, $4, $5)
+     returning ${MEMBER_FIELDS}`,
+    [
+      companyId,
+      input.role,
+      input.name,
+      input.phone,
+      await bcrypt.hash(input.password, 10),
+    ],
+  );
+  res.status(201).json(rows[0]);
+});
+
+const updateMemberSchema = z
+  .object({
+    name: z.string().trim().min(1),
+    role,
+    active: z.boolean(),
+    password: z.string().min(6, 'Password must be at least 6 characters'),
+  })
+  .partial();
+
+/** PATCH /admin/companies/:id/members/:memberId  {name?, role?, active?, password?} */
+router.patch('/admin/companies/:id/members/:memberId', async (req, res) => {
+  const companyId = parse(uuid, req.params.id);
+  const memberId = parse(uuid, req.params.memberId);
+  const input = parse(updateMemberSchema, req.body);
+
+  const member = await transaction(async client => {
+    const {rows} = await client.query(
+      `update users
+          set name = coalesce($3, name),
+              role = coalesce($4, role),
+              active = coalesce($5, active),
+              password_hash = coalesce($6, password_hash)
+        where id = $1 and company_id = $2
+        returning ${MEMBER_FIELDS}`,
+      [
+        memberId,
+        companyId,
+        input.name ?? null,
+        input.role ?? null,
+        input.active ?? null,
+        input.password ? await bcrypt.hash(input.password, 10) : null,
+      ],
+    );
+    if (!rows[0]) {
+      throw notFound('Member');
+    }
+    // Never leave a company without an active owner to run it.
+    const owners = await client.query(
+      `select count(*)::int as n from users
+        where company_id = $1 and role = 'owner' and active`,
+      [companyId],
+    );
+    if (owners.rows[0].n === 0) {
+      throw badRequest('A company needs at least one active owner');
+    }
+    return rows[0];
+  });
+
+  res.json(member);
 });
 
 /* -------------------------------- holidays -------------------------------- */
