@@ -1,0 +1,25 @@
+-- Kerala public holidays 2026 (same list the app shipped with).
+insert into holidays (state, date, name) values
+  ('Kerala', '2026-01-02', 'Mannam Jayanthi'),
+  ('Kerala', '2026-01-26', 'Republic Day'),
+  ('Kerala', '2026-03-20', 'Id-ul-Fitr (Ramzan)'),
+  ('Kerala', '2026-04-02', 'Maundy Thursday'),
+  ('Kerala', '2026-04-03', 'Good Friday'),
+  ('Kerala', '2026-04-14', 'Dr. B. R. Ambedkar Jayanthi'),
+  ('Kerala', '2026-04-15', 'Vishu'),
+  ('Kerala', '2026-05-01', 'May Day'),
+  ('Kerala', '2026-05-27', 'Id-ul-Adha (Bakrid)'),
+  ('Kerala', '2026-06-25', 'Muharram'),
+  ('Kerala', '2026-08-12', 'Karkadaka Vavu'),
+  ('Kerala', '2026-08-15', 'Independence Day'),
+  ('Kerala', '2026-08-25', 'First Onam / Milad-i-Sherif'),
+  ('Kerala', '2026-08-26', 'Thiruvonam'),
+  ('Kerala', '2026-08-27', 'Third Onam'),
+  ('Kerala', '2026-08-28', 'Fourth Onam / Sree Narayana Guru Jayanthi / Ayyankali Jayanthi'),
+  ('Kerala', '2026-09-04', 'Sreekrishna Jayanthi'),
+  ('Kerala', '2026-09-21', 'Sree Narayana Guru Samadhi Day'),
+  ('Kerala', '2026-10-02', 'Gandhi Jayanthi'),
+  ('Kerala', '2026-10-20', 'Mahanavami'),
+  ('Kerala', '2026-10-21', 'Vijayadasami'),
+  ('Kerala', '2026-12-25', 'Christmas')
+on conflict (state, date) do update set name = excluded.name;
