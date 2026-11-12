@@ -7,10 +7,10 @@
     "node": ">=22.18.0"
   },
   "scripts": {
-    "dev": "node --env-file=.env --watch src/server.ts",
-    "start": "node --env-file=.env src/server.ts",
-    "migrate": "node --env-file=.env scripts/migrate.ts",
-    "create-company": "node --env-file=.env scripts/create-company.ts",
+    "dev": "node --env-file-if-exists=.env --watch src/server.ts",
+    "start": "node --env-file-if-exists=.env src/server.ts",
+    "migrate": "node --env-file-if-exists=.env scripts/migrate.ts",
+    "create-company": "node --env-file-if-exists=.env scripts/create-company.ts",
     "test": "node --test --test-concurrency=1 \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },

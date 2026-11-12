@@ -2,7 +2,7 @@ const required = (name: string): string => {
   const value = process.env[name];
   if (!value) {
     throw new Error(
-      `Missing ${name}. Copy .env.example to .env and fill it in.`,
+      `Missing ${name}. Set it as an environment variable (locally: copy .env.example to .env).`,
     );
   }
   return value;
