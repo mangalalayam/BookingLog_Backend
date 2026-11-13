@@ -362,6 +362,44 @@ test('cancel keeps the trip, and history records every change', async () => {
   );
   assert.equal(history.body[0].trip.endDate, '2026-11-19');
   assert.equal(history.body[1].trip.endDate, '2026-11-20');
+
+  // Each entry says the editor's role, and an edit lists what it changed.
+  assert.deepEqual(
+    history.body.map((h: any) => h.changedByRole),
+    ['staff', 'owner', 'staff'],
+  );
+  assert.deepEqual(history.body[1].changes, [
+    {field: 'endDate', from: '2026-11-19', to: '2026-11-20'},
+    {field: 'advance', from: 5000, to: 8000},
+  ]);
+  assert.deepEqual(history.body[0].changes, []);
+  assert.deepEqual(history.body[2].changes, []);
+});
+
+test('saving a trip without changing anything is not logged as an edit', async () => {
+  const created = await call('POST', '/trips', {token: abcStaff, body: trip()});
+  const id = created.body.id;
+  const same = await call('PATCH', `/trips/${id}`, {
+    token: abcStaff,
+    // Everything as saved (vehicle in lower case, empty drop) = no change.
+    body: {...trip(), drop: ''},
+  });
+  assert.equal(same.status, 200);
+  assert.equal(same.body.updatedAt, created.body.updatedAt);
+
+  await call('PATCH', `/trips/${id}`, {
+    token: abcOwner,
+    body: {to: ['Munnar'], passengers: null},
+  });
+  const history = await call('GET', `/trips/${id}/history`, {token: abcStaff});
+  assert.deepEqual(
+    history.body.map((h: any) => h.action),
+    ['created', 'updated'],
+  );
+  assert.deepEqual(history.body[1].changes, [
+    {field: 'to', from: ['Munnar', 'Thekkady'], to: ['Munnar']},
+    {field: 'passengers', from: 12, to: null},
+  ]);
 });
 
 test('there is no way to delete a trip', async () => {
@@ -415,17 +453,27 @@ test('a trip is completed from its last day, and can be undone', async () => {
   );
 });
 
-test('balance payment is marked separately and needs a payment mode', async () => {
+test('balance payment is marked separately; payment mode is optional', async () => {
   const created = await call('POST', '/trips', {
     token: abcStaff,
-    body: trip({customerName: 'Pay Later', startDate: '2026-02-01', endDate: '2026-02-01'}),
+    // A balance mode sent at booking is ignored; it is set only on payment.
+    body: trip({
+      customerName: 'Pay Later',
+      startDate: '2026-02-01',
+      endDate: '2026-02-01',
+      balanceMode: 'UPI',
+    }),
   });
   const id = created.body.id;
   assert.equal(created.body.paymentReceived, false);
+  assert.equal(created.body.balanceMode, undefined);
 
-  // Balance of 20000 is due and no balance mode was chosen at booking.
+  // No payment mode is needed to mark the payment received.
   const noMode = await call('POST', `/trips/${id}/payment`, {token: abcStaff});
-  assert.equal(noMode.status, 400);
+  assert.equal(noMode.status, 200);
+  assert.equal(noMode.body.paymentReceived, true);
+  assert.equal(noMode.body.balanceMode, undefined);
+  await call('POST', `/trips/${id}/payment`, {token: abcStaff, body: {received: false}});
   assert.equal(
     (await call('POST', `/trips/${id}/payment`, {token: abcDriver, body: {balanceMode: 'Cash'}})).status,
     403,
@@ -452,7 +500,7 @@ test('balance payment is marked separately and needs a payment mode', async () =
   const history = await call('GET', `/trips/${id}/history`, {token: abcOwner});
   assert.deepEqual(
     history.body.map((h: any) => h.action),
-    ['created', 'payment_received', 'payment_pending'],
+    ['created', 'payment_received', 'payment_pending', 'payment_received', 'payment_pending'],
   );
 });
 
@@ -539,14 +587,14 @@ test('deactivated member and suspended company lose access at once', async () =>
 
   // Restoring brings everything back; no data was lost.
   await call('PATCH', `/admin/companies/${abcCompanyId}`, {admin: true, body: {active: true}});
-  // 3 from the earlier trip tests + 3 from the completion/payment tests.
+  // 4 from the earlier trip tests + 3 from the completion/payment tests.
   const list = await call('GET', '/trips', {token: abcOwner});
-  assert.equal(list.body.length, 6);
+  assert.equal(list.body.length, 7);
 
   const companies = await call('GET', '/admin/companies', {admin: true});
   const abc = companies.body.find((c: any) => c.id === abcCompanyId);
   assert.equal(abc.members, 3);
-  assert.equal(abc.trips, 6);
+  assert.equal(abc.trips, 7);
 });
 
 test('provider manages a company team from the admin panel', async () => {

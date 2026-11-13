@@ -9,7 +9,7 @@ import {badRequest, dateString, notFound, parse, uuid} from '../http.ts';
  * Trips are the data that must never be lost or wrong:
  *  - they are never deleted, only cancelled;
  *  - every create / edit / cancel is recorded in trip_history, in the same
- *    transaction as the change itself;
+ *    transaction as the change itself (a save that changes nothing is not);
  *  - "upcoming" is not stored; the app works it out from the dates.
  *  - "completed" and "payment received" are marked by a person once they
  *    happen (each can be undone), and are recorded in the history too.
@@ -26,7 +26,7 @@ const toTrip = (row: any) => ({
   to: row.destinations,
   drop: row.drop_place ?? '',
   pickupTime: row.pickup_time,
-  passengers: row.passengers,
+  passengers: row.passengers ?? undefined,
   vehicleNo: row.vehicle_no,
   startDate: row.start_date,
   endDate: row.end_date,
@@ -56,7 +56,7 @@ const tripFields = z.object({
   /** Optional final drop place; '' when not mentioned. */
   drop: z.string().trim().default(''),
   pickupTime: z.string().trim().default(''),
-  passengers: z.number().int().positive(),
+  passengers: z.number().int().positive().nullish(),
   vehicleNo: z
     .string()
     .trim()
@@ -67,7 +67,8 @@ const tripFields = z.object({
   totalAmount: z.number().nonnegative().default(0),
   advance: z.number().nonnegative().default(0),
   advanceMode: paymentMode,
-  balanceMode: paymentMode,
+  // No balanceMode here: the balance is paid after the trip, so its mode is
+  // set only when the payment is marked (POST /trips/:id/payment).
   notes: z.string().default(''),
 });
 
@@ -85,7 +86,7 @@ const updateSchema = z
     to: z.array(z.string().trim().min(1)).min(1),
     drop: z.string().trim(),
     pickupTime: z.string().trim(),
-    passengers: z.number().int().positive(),
+    passengers: z.number().int().positive().nullish(),
     vehicleNo: z
       .string()
       .trim()
@@ -96,7 +97,6 @@ const updateSchema = z
     totalAmount: z.number().nonnegative(),
     advance: z.number().nonnegative(),
     advanceMode: paymentMode,
-    balanceMode: paymentMode,
     notes: z.string(),
   })
   .partial();
@@ -174,11 +174,52 @@ router.get('/trips/:id', async (req, res) => {
   res.json(toTrip(rows[0]));
 });
 
-/** GET /trips/:id/history → who changed it and when, oldest first */
+/** Trip fields a person can change; compared to say what an edit changed. */
+const TRACKED_FIELDS = [
+  'customerName',
+  'phone',
+  'from',
+  'to',
+  'drop',
+  'pickupTime',
+  'passengers',
+  'vehicleNo',
+  'startDate',
+  'endDate',
+  'totalAmount',
+  'advance',
+  'advanceMode',
+  'balanceMode',
+  'notes',
+] as const;
+
+/** null, undefined and '' all mean "not set". */
+const normalise = (value: unknown) =>
+  value === undefined || value === null || value === '' ? null : value;
+
+const sameValue = (a: unknown, b: unknown) =>
+  JSON.stringify(normalise(a)) === JSON.stringify(normalise(b));
+
+/** The tracked fields that differ between two trips, with both values. */
+const diffTrips = (before: any, after: any) =>
+  TRACKED_FIELDS.filter(field => !sameValue(before?.[field], after?.[field])).map(
+    field => ({
+      field,
+      from: normalise(before?.[field]),
+      to: normalise(after?.[field]),
+    }),
+  );
+
+/**
+ * GET /trips/:id/history → who changed it, when, and what changed, oldest
+ * first. For an edit, `changes` lists each field with its old and new value
+ * (worked out from the snapshot before it); other actions have none.
+ */
 router.get('/trips/:id/history', async (req, res) => {
   const id = parse(uuid, req.params.id);
   const {rows} = await pool.query(
-    `select h.action, h.changed_at, h.snapshot, u.name as changed_by
+    `select h.action, h.changed_at, h.snapshot,
+            u.id as changed_by_id, u.name as changed_by, u.role as changed_by_role
        from trip_history h
        left join users u on u.id = h.changed_by
       where h.trip_id = $1 and h.company_id = $2
@@ -186,10 +227,16 @@ router.get('/trips/:id/history', async (req, res) => {
     [id, req.user.companyId],
   );
   res.json(
-    rows.map(row => ({
+    rows.map((row, index) => ({
       action: row.action,
       changedAt: new Date(row.changed_at).getTime(),
       changedBy: row.changed_by,
+      changedById: row.changed_by_id,
+      changedByRole: row.changed_by_role,
+      changes:
+        row.action === 'updated' && index > 0
+          ? diffTrips(rows[index - 1].snapshot, row.snapshot)
+          : [],
       trip: row.snapshot,
     })),
   );
@@ -212,10 +259,10 @@ router.post('/trips', requireRole('owner', 'staff'), async (req, res) => {
       `insert into trips
          (company_id, client_id, customer_name, phone, from_place, destinations,
           pickup_time, passengers, vehicle_no, start_date, end_date,
-          total_amount, advance, advance_mode, balance_mode, notes,
+          total_amount, advance, advance_mode, notes,
           created_by, updated_by, drop_place)
        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-               $15, $16, $17, $17, $18)
+               $15, $16, $16, $17)
        on conflict (company_id, client_id) do nothing
        returning *`,
       [
@@ -226,14 +273,13 @@ router.post('/trips', requireRole('owner', 'staff'), async (req, res) => {
         input.from,
         input.to,
         input.pickupTime,
-        input.passengers,
+        input.passengers ?? null,
         input.vehicleNo,
         input.startDate,
         input.endDate,
         input.totalAmount,
         input.advance,
         input.advanceMode ?? null,
-        input.balanceMode ?? null,
         input.notes,
         req.user.id,
         input.drop,
@@ -274,6 +320,11 @@ router.patch('/trips/:id', requireRole('owner', 'staff'), async (req, res) => {
     const after = {...before, ...input};
     checkTrip(after);
 
+    // Saving without changing anything is not an edit: nothing to log.
+    if (diffTrips(before, after).length === 0) {
+      return current.rows[0];
+    }
+
     const updated = await client.query(
       `update trips
           set customer_name = $3, phone = $4, from_place = $5, destinations = $6,
@@ -291,7 +342,7 @@ router.patch('/trips/:id', requireRole('owner', 'staff'), async (req, res) => {
         after.from,
         after.to,
         after.pickupTime,
-        after.passengers,
+        after.passengers ?? null,
         after.vehicleNo,
         after.startDate,
         after.endDate,
@@ -455,7 +506,7 @@ router.post(
 const paymentSchema = z.object({
   /** false = undo a payment marked by mistake. */
   received: z.boolean().default(true),
-  /** How the balance was paid; needed if the trip doesn't have one yet. */
+  /** How the balance was paid; optional. */
   balanceMode: z.enum(['Cash', 'UPI']).optional(),
 });
 
@@ -490,11 +541,6 @@ router.post(
       if (received && trip.cancelled) {
         throw badRequest('A cancelled trip has no payment to receive');
       }
-      const balance = Number(trip.total_amount) - Number(trip.advance);
-      if (received && balance > 0 && !mode) {
-        throw badRequest('Choose how the balance was paid (Cash or UPI)');
-      }
-
       const updated = await client.query(
         `update trips
             set payment_received_at = ${received ? 'now()' : 'null'},
