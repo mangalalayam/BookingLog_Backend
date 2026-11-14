@@ -21,6 +21,9 @@ if (!new URL(url).pathname.endsWith('_test')) {
 process.env.DATABASE_URL = url;
 process.env.JWT_SECRET = 'test-secret';
 process.env.ADMIN_API_KEY = 'test-admin-key';
+process.env.LOG_REQUESTS = 'false';
+// Every test request comes from the same address; do not rate-limit them.
+process.env.RATE_LIMIT_PER_MINUTE = '100000';
 
 // Imported after the environment is set, because config reads it on load.
 const {pool} = await import('../src/db.ts');
@@ -528,17 +531,21 @@ test('a cancelled trip can be restored, and it is logged', async () => {
   );
 });
 
-test('holidays: 2026 is seeded, next year can be added later', async () => {
+test('holidays: 2026 and 2027 are seeded, next year can be added later', async () => {
   const y2026 = await call('GET', '/holidays?year=2026');
   assert.equal(y2026.status, 200);
   assert.equal(y2026.body.length, 22);
   assert.deepEqual(y2026.body[0], {date: '2026-01-02', name: 'Mannam Jayanthi'});
 
-  assert.deepEqual((await call('GET', '/holidays?year=2027')).body, []);
+  const y2027 = await call('GET', '/holidays?year=2027');
+  assert.equal(y2027.body.length, 21);
+  assert.deepEqual(y2027.body[20], {date: '2027-12-25', name: 'Christmas'});
+
+  assert.deepEqual((await call('GET', '/holidays?year=2028')).body, []);
 
   const denied = await call('PUT', '/admin/holidays', {
     token: abcOwner,
-    body: {holidays: [{date: '2027-01-26', name: 'Republic Day'}]},
+    body: {holidays: [{date: '2028-01-26', name: 'Republic Day'}]},
   });
   assert.equal(denied.status, 401);
 
@@ -546,8 +553,8 @@ test('holidays: 2026 is seeded, next year can be added later', async () => {
     admin: true,
     body: {
       holidays: [
-        {date: '2027-01-26', name: 'Republic Day'},
-        {date: '2027-08-15', name: 'Independence Day'},
+        {date: '2028-01-26', name: 'Republic Day'},
+        {date: '2028-08-15', name: 'Independence Day'},
       ],
     },
   });
@@ -556,16 +563,16 @@ test('holidays: 2026 is seeded, next year can be added later', async () => {
   // Sending the same list again renames instead of duplicating.
   await call('PUT', '/admin/holidays', {
     admin: true,
-    body: {holidays: [{date: '2027-01-26', name: 'Republic Day (renamed)'}]},
+    body: {holidays: [{date: '2028-01-26', name: 'Republic Day (renamed)'}]},
   });
-  const y2027 = await call('GET', '/holidays?year=2027');
-  assert.deepEqual(y2027.body, [
-    {date: '2027-01-26', name: 'Republic Day (renamed)'},
-    {date: '2027-08-15', name: 'Independence Day'},
+  const yNext = await call('GET', '/holidays?year=2028');
+  assert.deepEqual(yNext.body, [
+    {date: '2028-01-26', name: 'Republic Day (renamed)'},
+    {date: '2028-08-15', name: 'Independence Day'},
   ]);
 
-  assert.equal((await call('DELETE', '/admin/holidays/2027-08-15', {admin: true})).status, 204);
-  assert.equal((await call('GET', '/holidays?year=2027')).body.length, 1);
+  assert.equal((await call('DELETE', '/admin/holidays/2028-08-15', {admin: true})).status, 204);
+  assert.equal((await call('GET', '/holidays?year=2028')).body.length, 1);
 });
 
 test('deactivated member and suspended company lose access at once', async () => {
@@ -644,4 +651,158 @@ test('provider manages a company team from the admin panel', async () => {
 
   const missing = await call('GET', '/admin/companies/00000000-0000-0000-0000-000000000000/members', {admin: true});
   assert.equal(missing.status, 404);
+});
+
+test('owner deletes a member: gone from the team, history keeps the name', async () => {
+  const added = await call('POST', '/trips', {
+    token: abcStaff,
+    body: trip({startDate: '2026-12-20', endDate: '2026-12-20'}),
+  });
+  assert.equal(added.status, 201);
+
+  const before = await call('GET', '/members', {token: abcOwner});
+  const sibi = before.body.find((m: any) => m.phone === '9847000003');
+  const self = before.body.find((m: any) => m.phone === '9847000001');
+
+  // Only the owner deletes, only in their own company, and never themselves.
+  assert.equal((await call('DELETE', `/members/${self.id}`, {token: abcStaff})).status, 403);
+  assert.equal((await call('DELETE', `/members/${sibi.id}`, {token: xyzOwner})).status, 404);
+  assert.equal((await call('DELETE', `/members/${self.id}`, {token: abcOwner})).status, 400);
+
+  assert.equal((await call('DELETE', `/members/${sibi.id}`, {token: abcOwner})).status, 204);
+  assert.equal((await call('DELETE', `/members/${sibi.id}`, {token: abcOwner})).status, 404);
+
+  // Logged out at once, cannot log in, cannot be brought back.
+  assert.equal((await call('GET', '/trips', {token: abcStaff})).status, 401);
+  const relogin = await call('POST', '/auth/login', {
+    body: {phone: '9847000003', password: 'secret3'},
+  });
+  assert.equal(relogin.status, 401);
+  const revive = await call('PATCH', `/members/${sibi.id}`, {
+    token: abcOwner,
+    body: {active: true},
+  });
+  assert.equal(revive.status, 404);
+
+  const list = await call('GET', '/members', {token: abcOwner});
+  assert.equal(list.body.length, before.body.length - 1);
+  assert.ok(!list.body.some((m: any) => m.id === sibi.id));
+
+  const history = await call('GET', `/trips/${added.body.id}/history`, {token: abcOwner});
+  assert.equal(history.body[0].changedBy, 'Sibi');
+
+  // The phone number is free for a new account.
+  const again = await call('POST', '/members', {
+    token: abcOwner,
+    body: {name: 'New Sibi', phone: '9847000003', password: 'secret9'},
+  });
+  assert.equal(again.status, 201);
+  await login('9847000003', 'secret9');
+});
+
+test('trips can be fetched a page at a time, or only what changed', async () => {
+  const all = await call('GET', '/trips', {token: abcOwner});
+  assert.ok(all.body.length >= 4);
+
+  // Pages follow the same order as the full list and do not overlap.
+  const first = await call('GET', '/trips?limit=3', {token: abcOwner});
+  const second = await call('GET', '/trips?limit=3&offset=3', {token: abcOwner});
+  assert.deepEqual(
+    [...first.body, ...second.body].map((t: any) => t.id),
+    all.body.slice(0, 6).map((t: any) => t.id),
+  );
+  assert.equal((await call('GET', '/trips?limit=0', {token: abcOwner})).status, 400);
+  assert.equal((await call('GET', '/trips?limit=501', {token: abcOwner})).status, 400);
+
+  // Only the trip edited after the newest known change comes back.
+  const newest = Math.max(...all.body.map((t: any) => t.updatedAt));
+  const target = all.body.find((t: any) => t.updatedAt !== newest);
+  await call('PATCH', `/trips/${target.id}`, {token: abcOwner, body: {notes: 'changed later'}});
+  const changed = await call('GET', `/trips?updatedSince=${newest}`, {token: abcOwner});
+  assert.ok(changed.body.some((t: any) => t.id === target.id));
+  assert.ok(changed.body.length < all.body.length);
+  assert.equal((await call('GET', '/trips?updatedSince=abc', {token: abcOwner})).status, 400);
+});
+
+test('changing a password logs out the tokens issued before it', async () => {
+  const members = await call('GET', '/members', {token: abcOwner});
+  const member = members.body.find((m: any) => m.phone === '9847000003');
+  const oldToken = await login('9847000003', 'secret9');
+  assert.equal((await call('GET', '/trips', {token: oldToken})).status, 200);
+
+  // A change that is not the password keeps the login.
+  await call('PATCH', `/members/${member.id}`, {token: abcOwner, body: {name: 'Sibi Two'}});
+  assert.equal((await call('GET', '/trips', {token: oldToken})).status, 200);
+
+  await call('PATCH', `/members/${member.id}`, {token: abcOwner, body: {password: 'changed1'}});
+  assert.equal((await call('GET', '/trips', {token: oldToken})).status, 401);
+  assert.equal((await call('POST', '/auth/refresh-token', {token: oldToken})).status, 401);
+
+  const newToken = await login('9847000003', 'changed1');
+  const refreshed = await call('POST', '/auth/refresh-token', {token: newToken});
+  assert.equal((await call('GET', '/trips', {token: refreshed.body.token})).status, 200);
+
+  // A reset from the admin panel does the same.
+  await call('PATCH', `/admin/companies/${abcCompanyId}/members/${member.id}`, {
+    admin: true,
+    body: {password: 'changed2'},
+  });
+  assert.equal((await call('GET', '/trips', {token: newToken})).status, 401);
+});
+
+test('changes made through /admin are logged, without the request body', async () => {
+  const {rows} = await pool.query('select method, path, status from admin_log order by id');
+  assert.ok(rows.length > 0);
+  assert.ok(rows.every(row => row.method !== 'GET'));
+  assert.deepEqual(rows[0], {method: 'POST', path: '/admin/companies', status: 201});
+});
+
+test('one address cannot flood the server', async () => {
+  const limited = createApp({rateLimitPerMinute: 3, logRequests: false}).listen(0);
+  const address = `http://localhost:${(limited.address() as AddressInfo).port}`;
+  try {
+    const statuses: number[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      statuses.push((await fetch(`${address}/holidays?year=2026`)).status);
+    }
+    assert.deepEqual(statuses, [200, 200, 200, 429, 429]);
+    // The health check is never limited.
+    assert.equal((await fetch(`${address}/health`)).status, 200);
+  } finally {
+    await new Promise(resolve => limited.close(resolve));
+  }
+});
+
+test('eight wrong passwords lock that login for a while', async () => {
+  for (let i = 0; i < 8; i += 1) {
+    const bad = await call('POST', '/auth/login', {
+      body: {phone: '9847000002', password: 'wrong'},
+    });
+    assert.equal(bad.status, 401);
+  }
+  const locked = await call('POST', '/auth/login', {
+    body: {phone: '9847000002', password: 'secret2'},
+  });
+  assert.equal(locked.status, 429);
+  assert.equal(locked.body.error.code, 'TOO_MANY_ATTEMPTS');
+
+  // Other accounts are not affected, and existing logins keep working.
+  await login('9847000001', 'secret1');
+  assert.equal((await call('GET', '/profile', {token: xyzOwner})).status, 200);
+
+  // Once the 15 minutes have passed, the right password works again.
+  await pool.query(
+    "update failed_attempts set since = now() - interval '16 minutes' where key like 'login%'",
+  );
+  await login('9847000002', 'secret2');
+});
+
+// Keep this last: it locks the admin routes for the test machine's address.
+test('ten wrong admin keys lock the admin routes for that address', async () => {
+  await pool.query("delete from failed_attempts where key like 'admin:%'");
+  for (let i = 0; i < 10; i += 1) {
+    assert.equal((await call('GET', '/admin/companies')).status, 401);
+  }
+  const locked = await call('GET', '/admin/companies', {admin: true});
+  assert.equal(locked.status, 429);
 });

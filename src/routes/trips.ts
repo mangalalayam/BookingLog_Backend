@@ -141,22 +141,40 @@ const recordHistory = (
 const listSchema = z.object({
   from: dateString.optional(),
   to: dateString.optional(),
+  /** An `updatedAt` value (milliseconds) from an earlier response. */
+  updatedSince: z.coerce.number().int().nonnegative().optional(),
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+  offset: z.coerce.number().int().nonnegative().default(0),
 });
 
 /**
  * GET /trips → all my company's trips, soonest first.
  * GET /trips?from=2026-11-01&to=2026-11-30 → only trips that touch that range
  * (a trip running 29 Oct – 2 Nov is included).
+ * GET /trips?updatedSince=1763100000000 → only trips created or changed
+ * since then. Pass the newest `updatedAt` already held; that trip itself may
+ * come back again. Trips are never deleted, so this misses nothing.
+ * GET /trips?limit=100&offset=200 → one page (limit up to 500); fewer rows
+ * than `limit` means it was the last page.
  */
 router.get('/trips', async (req, res) => {
-  const {from, to} = parse(listSchema, req.query);
+  const {from, to, updatedSince, limit, offset} = parse(listSchema, req.query);
   const {rows} = await pool.query(
     `select * from trips
       where company_id = $1
         and ($2::date is null or end_date >= $2::date)
         and ($3::date is null or start_date <= $3::date)
-      order by start_date, created_at`,
-    [req.user.companyId, from ?? null, to ?? null],
+        and ($4::float8 is null or updated_at > to_timestamp($4::float8 / 1000))
+      order by start_date, created_at, id
+      limit $5 offset $6`,
+    [
+      req.user.companyId,
+      from ?? null,
+      to ?? null,
+      updatedSince ?? null,
+      limit ?? null,
+      offset,
+    ],
   );
   res.json(rows.map(toTrip));
 });

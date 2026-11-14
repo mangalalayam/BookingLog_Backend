@@ -19,7 +19,7 @@ createdb -U postgres bookinglog
 # 2. Create .env from the example, then set your postgres password and two secrets
 cp .env.example .env
 
-# 3. Create the tables and load the 2026 holidays
+# 3. Create the tables and load the 2026 and 2027 holidays
 npm run migrate
 
 # 4. Create your first tour company and its owner login
@@ -50,14 +50,14 @@ Errors come back as `{"error": {"code", "message", "details"}}`.
 | `POST /auth/login` | `{phone, password}` → `{token, user}` |
 | `POST /auth/refresh-token` | New token from a still-valid one |
 | `GET /profile` | The logged-in user and company |
-| `GET /trips` | All trips; `?from=YYYY-MM-DD&to=YYYY-MM-DD` for a date range |
+| `GET /trips` | All trips; `?from=YYYY-MM-DD&to=YYYY-MM-DD` for a date range, `?updatedSince=<updatedAt>` for only what changed, `?limit=100&offset=0` for one page |
 | `GET /trips/:id` | One trip |
 | `GET /trips/:id/history` | Who changed it and when |
 | `POST /trips` | Create (send a `clientId` to make retries safe) |
 | `PATCH /trips/:id` | Change only the fields sent |
 | `POST /trips/:id/cancel` | Cancel (trips are never deleted) |
 | `GET /vehicles`, `POST /vehicles`, `PATCH /vehicles/:id`, `DELETE /vehicles/:id` | Vehicles |
-| `GET /members`, `POST /members`, `PATCH /members/:id` | Team (changes are owner-only) |
+| `GET /members`, `POST /members`, `PATCH /members/:id`, `DELETE /members/:id` | Team (changes are owner-only; `PATCH {active}` disables or enables a login) |
 | `GET /holidays?year=2026` | Public holidays; no login needed |
 | `POST /admin/companies`, `GET /admin/companies`, `PATCH /admin/companies/:id` | Provider: manage companies |
 | `GET /admin/companies/:id/members`, `POST /admin/companies/:id/members`, `PATCH /admin/companies/:id/members/:memberId` | Provider: manage a company's team |
@@ -65,6 +65,17 @@ Errors come back as `{"error": {"code", "message", "details"}}`.
 
 Trips and vehicles use the same field names as the app's `Booking` and
 `Vehicle` types.
+
+## Protection built in
+
+- Changing a member's password logs them out everywhere.
+- Wrong passwords are limited to 8 per phone number from one IP address in 15
+  minutes; wrong admin keys to 10 per IP address. The answer is then `429`.
+- One IP address may make 300 requests a minute (`RATE_LIMIT_PER_MINUTE`).
+- Every change made through `/admin` is recorded in the `admin_log` table.
+- Each request is printed as one JSON line (`LOG_REQUESTS=false` to stop).
+
+What is still to do is listed in [FUTURE_WORK.md](FUTURE_WORK.md).
 
 ## Adding next year's holidays
 
@@ -75,7 +86,7 @@ are renamed, not duplicated.
 curl -X PUT http://localhost:4000/admin/holidays \
   -H "x-admin-key: YOUR_ADMIN_API_KEY" \
   -H "content-type: application/json" \
-  -d '{"holidays":[{"date":"2027-01-26","name":"Republic Day"}]}'
+  -d '{"holidays":[{"date":"2028-01-26","name":"Republic Day"}]}'
 ```
 
 ## Tests

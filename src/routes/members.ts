@@ -7,8 +7,9 @@ import {badRequest, conflict, notFound, parse, phone, uuid} from '../http.ts';
 
 /*
  * A company's team. Everyone can see the list; only the owner changes it.
- * Members are deactivated rather than deleted, so trip history keeps the
- * name of whoever made each change.
+ * A member can be disabled (and enabled again) or deleted. A deleted member's
+ * row is kept but hidden, so trip history keeps the name of whoever made
+ * each change.
  */
 const router = Router();
 router.use('/members', requireUser);
@@ -18,7 +19,9 @@ const FIELDS = 'id, name, phone, role, active, created_at';
 /** GET /members → everyone in my company */
 router.get('/members', async (req, res) => {
   const {rows} = await pool.query(
-    `select ${FIELDS} from users where company_id = $1 order by created_at`,
+    `select ${FIELDS} from users
+      where company_id = $1 and deleted_at is null
+      order by created_at`,
     [req.user.companyId],
   );
   res.json(rows);
@@ -35,9 +38,10 @@ const createSchema = z.object({
 router.post('/members', requireRole('owner'), async (req, res) => {
   const input = parse(createSchema, req.body);
 
-  const taken = await pool.query('select 1 from users where phone = $1', [
-    input.phone,
-  ]);
+  const taken = await pool.query(
+    'select 1 from users where phone = $1 and deleted_at is null',
+    [input.phone],
+  );
   if (taken.rowCount) {
     throw conflict('That phone number already has an account');
   }
@@ -84,8 +88,10 @@ router.patch('/members/:id', requireRole('owner'), async (req, res) => {
         set name = coalesce($3, name),
             role = coalesce($4, role),
             active = coalesce($5, active),
-            password_hash = coalesce($6, password_hash)
-      where id = $1 and company_id = $2
+            password_hash = coalesce($6, password_hash),
+            -- A new password logs the member out everywhere.
+            token_version = token_version + ($6::text is not null)::int
+      where id = $1 and company_id = $2 and deleted_at is null
       returning ${FIELDS}`,
     [
       id,
@@ -100,6 +106,28 @@ router.patch('/members/:id', requireRole('owner'), async (req, res) => {
     throw notFound('Member');
   }
   res.json(rows[0]);
+});
+
+/**
+ * DELETE /members/:id → remove a team member for good. They are logged out
+ * at once and their phone number becomes free for a new account.
+ */
+router.delete('/members/:id', requireRole('owner'), async (req, res) => {
+  const id = parse(uuid, req.params.id);
+  if (id === req.user.id) {
+    throw badRequest('You cannot delete your own account');
+  }
+
+  const result = await pool.query(
+    `update users
+        set deleted_at = now(), active = false
+      where id = $1 and company_id = $2 and deleted_at is null`,
+    [id, req.user.companyId],
+  );
+  if (!result.rowCount) {
+    throw notFound('Member');
+  }
+  res.status(204).end();
 });
 
 export default router;

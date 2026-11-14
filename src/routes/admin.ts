@@ -12,6 +12,23 @@ import {badRequest, conflict, dateString, notFound, parse, phone, uuid} from '..
 const router = Router();
 router.use('/admin', requireAdmin);
 
+// Keep a record of every change made here (not reads, and never the body,
+// which can hold a password): what was called, the result, and from where.
+router.use('/admin', (req, res, next) => {
+  if (req.method !== 'GET') {
+    const path = req.originalUrl.split('?')[0];
+    res.on('finish', () => {
+      pool
+        .query(
+          'insert into admin_log (method, path, status, ip) values ($1, $2, $3, $4)',
+          [req.method, path, res.statusCode, req.ip ?? null],
+        )
+        .catch(error => console.error('Could not write admin_log:', error));
+    });
+  }
+  next();
+});
+
 /* -------------------------------- companies ------------------------------- */
 
 const createCompanySchema = z.object({
@@ -29,9 +46,10 @@ router.post('/admin/companies', async (req, res) => {
   const passwordHash = await bcrypt.hash(input.owner.password, 10);
 
   const result = await transaction(async client => {
-    const taken = await client.query('select 1 from users where phone = $1', [
-      input.owner.phone,
-    ]);
+    const taken = await client.query(
+      'select 1 from users where phone = $1 and deleted_at is null',
+      [input.owner.phone],
+    );
     if (taken.rowCount) {
       throw conflict('That phone number already has an account');
     }
@@ -55,7 +73,8 @@ router.post('/admin/companies', async (req, res) => {
 router.get('/admin/companies', async (_req, res) => {
   const {rows} = await pool.query(
     `select c.id, c.name, c.active, c.created_at,
-            (select count(*)::int from users u where u.company_id = c.id) as members,
+            (select count(*)::int from users u
+              where u.company_id = c.id and u.deleted_at is null) as members,
             (select count(*)::int from trips t where t.company_id = c.id) as trips
        from companies c
       order by c.created_at`,
@@ -105,7 +124,9 @@ router.get('/admin/companies/:id/members', async (req, res) => {
   const companyId = parse(uuid, req.params.id);
   await companyExists(companyId);
   const {rows} = await pool.query(
-    `select ${MEMBER_FIELDS} from users where company_id = $1 order by created_at`,
+    `select ${MEMBER_FIELDS} from users
+      where company_id = $1 and deleted_at is null
+      order by created_at`,
     [companyId],
   );
   res.json(rows);
@@ -124,9 +145,10 @@ router.post('/admin/companies/:id/members', async (req, res) => {
   const input = parse(createMemberSchema, req.body);
   await companyExists(companyId);
 
-  const taken = await pool.query('select 1 from users where phone = $1', [
-    input.phone,
-  ]);
+  const taken = await pool.query(
+    'select 1 from users where phone = $1 and deleted_at is null',
+    [input.phone],
+  );
   if (taken.rowCount) {
     throw conflict('That phone number already has an account');
   }
@@ -167,8 +189,10 @@ router.patch('/admin/companies/:id/members/:memberId', async (req, res) => {
           set name = coalesce($3, name),
               role = coalesce($4, role),
               active = coalesce($5, active),
-              password_hash = coalesce($6, password_hash)
-        where id = $1 and company_id = $2
+              password_hash = coalesce($6, password_hash),
+              -- A new password logs the member out everywhere.
+              token_version = token_version + ($6::text is not null)::int
+        where id = $1 and company_id = $2 and deleted_at is null
         returning ${MEMBER_FIELDS}`,
       [
         memberId,

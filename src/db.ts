@@ -10,7 +10,20 @@ pg.types.setTypeParser(pg.types.builtins.DATE, value => value);
 // NUMERIC arrives as text; amounts here are small enough for a JS number.
 pg.types.setTypeParser(pg.types.builtins.NUMERIC, value => Number(value));
 
-export const pool = new pg.Pool({connectionString: config.databaseUrl});
+export const pool = new pg.Pool({
+  connectionString: config.databaseUrl,
+  max: config.dbPoolMax,
+  // Fail fast rather than hang when the database is unreachable or stuck.
+  connectionTimeoutMillis: 10_000,
+  statement_timeout: 30_000,
+  idle_in_transaction_session_timeout: 60_000,
+});
+
+// An idle connection can drop (database restart, network blip). Without this
+// listener that would crash the server; the pool replaces it by itself.
+pool.on('error', error => {
+  console.error('Idle database connection failed:', error.message);
+});
 
 export type Db = pg.Pool | pg.PoolClient;
 

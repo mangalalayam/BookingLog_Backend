@@ -20,6 +20,8 @@ export const migrate = async (): Promise<string[]> => {
   const applied: string[] = [];
   for (const file of files) {
     const ran = await transaction(async client => {
+      // A migration may take longer than a normal request is allowed to.
+      await client.query('set local statement_timeout = 0');
       await client.query(
         `create table if not exists schema_migrations (
            name text primary key,
